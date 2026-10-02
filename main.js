@@ -1,0 +1,455 @@
+const { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Tray, Menu } = require('electron');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const { execFile } = require('child_process');
+const Database = require('better-sqlite3');
+const WebSocket = require('ws');
+
+const SYNC_PORT = 17321;
+const COORDINATE_PATTERN = /(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/;
+const MINECRAFT_PROCESS_NAME = 'Minecraft.Windows.exe';
+const MINECRAFT_POLL_MS = 2000;
+let mainWindow;
+let database;
+let syncServer;
+let lastClipboardText = '';
+const peers = new Set();
+const syncClients = new Set();
+let minecraftRunning = false;
+let hotkeyRegistered = false;
+let tray = null;
+let isQuitting = false;
+
+function createDatabase() {
+  database = new Database(path.join(app.getPath('userData'), 'waypoints.db'));
+  database.pragma('journal_mode = WAL');
+  database.pragma('foreign_keys = ON');
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS worlds (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS categories (
+      id TEXT PRIMARY KEY,
+      world_id TEXT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(world_id, name)
+    );
+    CREATE TABLE IF NOT EXISTS waypoints (
+      id TEXT PRIMARY KEY,
+      world_id TEXT NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      dimension TEXT NOT NULL,
+      x INTEGER NOT NULL,
+      y INTEGER NOT NULL,
+      z INTEGER NOT NULL,
+      nether_x INTEGER,
+      nether_z INTEGER,
+      description TEXT NOT NULL DEFAULT '',
+      favorite INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      source_device TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_waypoints_world ON waypoints(world_id);
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+  `);
+
+  if (!database.prepare('SELECT 1 FROM worlds LIMIT 1').get()) {
+    const now = Date.now();
+    const worldId = crypto.randomUUID();
+    database.prepare('INSERT INTO worlds (id, name, created_at) VALUES (?, ?, ?)').run(worldId, 'My World', now);
+    const insertCategory = database.prepare(
+      'INSERT INTO categories (id, world_id, name, created_at) VALUES (?, ?, ?, ?)'
+    );
+    ['Home', 'Villages', 'Nether Portals', 'Farms', 'Base', 'POI', 'Ancient Cities', 'Other']
+      .forEach((name) => insertCategory.run(crypto.randomUUID(), worldId, name, now));
+  }
+}
+
+function listData() {
+  const worlds = database.prepare('SELECT * FROM worlds ORDER BY name COLLATE NOCASE').all();
+  const categories = database.prepare('SELECT * FROM categories ORDER BY name COLLATE NOCASE').all();
+  const waypoints = database.prepare('SELECT * FROM waypoints ORDER BY favorite DESC, created_at DESC').all();
+  return { worlds, categories, waypoints };
+}
+
+function getSetting(key, fallback) {
+  const row = database.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : fallback;
+}
+
+function setSetting(key, value) {
+  database.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value);
+}
+
+function isPinned() {
+  return getSetting('pinned', '0') === '1';
+}
+
+function send(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+function broadcast(message, except) {
+  const serialized = JSON.stringify(message);
+  for (const socket of [...peers, ...syncClients]) {
+    if (socket !== except && socket.readyState === WebSocket.OPEN) socket.send(serialized);
+  }
+}
+
+function mergeSnapshot(snapshot) {
+  const worldIds = new Map();
+  for (const world of snapshot.worlds || []) {
+    const existing = database.prepare('SELECT id FROM worlds WHERE name = ?').get(world.name);
+    const id = existing ? existing.id : world.id;
+    database.prepare(`
+      INSERT INTO worlds (id, name, created_at) VALUES (?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name
+    `).run(id, world.name, world.created_at);
+    worldIds.set(world.id, id);
+  }
+  for (const category of snapshot.categories || []) {
+    const worldId = worldIds.get(category.world_id) || category.world_id;
+    const existing = database.prepare('SELECT id FROM categories WHERE world_id = ? AND name = ?').get(worldId, category.name);
+    const id = existing ? existing.id : category.id;
+    database.prepare(`
+      INSERT INTO categories (id, world_id, name, created_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, world_id=excluded.world_id
+    `).run(id, worldId, category.name, category.created_at);
+  }
+  for (const waypoint of snapshot.waypoints || []) {
+    const worldId = worldIds.get(waypoint.world_id) || waypoint.world_id;
+    if (!database.prepare('SELECT 1 FROM worlds WHERE id = ?').get(worldId)) continue;
+    upsertWaypoint({ ...waypoint, world_id: worldId }, false);
+  }
+}
+
+function upsertWaypoint(waypoint, shouldBroadcast = true) {
+  database.prepare(`
+    INSERT INTO waypoints (
+      id, world_id, name, category, dimension, x, y, z, nether_x, nether_z,
+      description, favorite, created_at, source_device
+    ) VALUES (@id, @world_id, @name, @category, @dimension, @x, @y, @z, @nether_x, @nether_z,
+      @description, @favorite, @created_at, @source_device)
+    ON CONFLICT(id) DO UPDATE SET
+      world_id=excluded.world_id, name=excluded.name, category=excluded.category,
+      dimension=excluded.dimension, x=excluded.x, y=excluded.y, z=excluded.z,
+      nether_x=excluded.nether_x, nether_z=excluded.nether_z,
+      description=excluded.description, favorite=excluded.favorite,
+      created_at=excluded.created_at, source_device=excluded.source_device
+  `).run(waypoint);
+  if (shouldBroadcast) broadcast({ type: 'waypoint-upsert', waypoint });
+}
+
+const APP_ICON_PATH = path.join(__dirname, 'build', 'icon.ico');
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 520,
+    height: 760,
+    minWidth: 460,
+    minHeight: 620,
+    alwaysOnTop: false,
+    frame: false,
+    transparent: true,
+    show: false,
+    icon: APP_ICON_PATH,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('close', (event) => {
+    // Clicking the window's own close button just tucks it into the tray instead of quitting the app,
+    // since the app is meant to keep quietly watching for Minecraft in the background.
+    if (!isQuitting) {
+      event.preventDefault();
+      hideOverlayAndReturnToGame();
+    }
+  });
+  mainWindow.setAlwaysOnTop(isPinned());
+}
+
+function createTray() {
+  try {
+    tray = new Tray(APP_ICON_PATH);
+  } catch (error) {
+    console.error('Failed to create tray icon:', error);
+    return;
+  }
+  tray.setToolTip('Minecraft Field Notes');
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'Open Field Notes', click: () => showAndFocusOverlay() },
+    { type: 'separator' },
+    {
+      label: 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+  tray.setContextMenu(contextMenu);
+  tray.on('click', () => {
+    if (mainWindow && mainWindow.isVisible()) hideOverlayAndReturnToGame();
+    else showAndFocusOverlay();
+  });
+}
+
+function parseCoordinates(text) {
+  const match = text.match(COORDINATE_PATTERN);
+  if (!match) return null;
+  return {
+    x: Math.round(Number(match[1])),
+    y: Math.round(Number(match[2])),
+    z: Math.round(Number(match[3]))
+  };
+}
+
+function startClipboardPoll() {
+  setInterval(() => {
+    if (!minecraftRunning) return;
+    const text = clipboard.readText().trim();
+    if (!text || text === lastClipboardText) return;
+    lastClipboardText = text;
+    const coordinates = parseCoordinates(text);
+    if (!coordinates) return;
+    send('clipboard-coordinates', coordinates);
+    showAndFocusOverlay();
+  }, 500);
+}
+
+function showAndFocusOverlay() {
+  if (!mainWindow) return;
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+  send('request-focus-name');
+}
+
+function refocusMinecraft() {
+  // Hand keyboard focus back to Minecraft automatically so the player never has to Alt+Tab manually.
+  execFile('powershell', [
+    '-NoProfile', '-WindowStyle', 'Hidden', '-Command',
+    "(New-Object -ComObject WScript.Shell).AppActivate('Minecraft') | Out-Null"
+  ], () => {});
+}
+
+function hideOverlayAndReturnToGame() {
+  if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
+  if (minecraftRunning) refocusMinecraft();
+}
+
+function isMinecraftRunning(callback) {
+  // tasklist is faster and more reliable than spinning up PowerShell/WMI for a 2s poll.
+  execFile('tasklist', ['/FI', `IMAGENAME eq ${MINECRAFT_PROCESS_NAME}`, '/NH'], (error, stdout) => {
+    if (error) { callback(false); return; }
+    callback(stdout.toLowerCase().includes(MINECRAFT_PROCESS_NAME.toLowerCase()));
+  });
+}
+
+function registerHotkey() {
+  if (hotkeyRegistered) return;
+  hotkeyRegistered = globalShortcut.register('Alt+L', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isVisible()) hideOverlayAndReturnToGame();
+    else showAndFocusOverlay();
+  });
+}
+
+function unregisterHotkey() {
+  if (!hotkeyRegistered) return;
+  globalShortcut.unregister('Alt+L');
+  hotkeyRegistered = false;
+}
+
+function startMinecraftWatcher() {
+  const evaluate = () => {
+    isMinecraftRunning((running) => {
+      if (running === minecraftRunning) return;
+      minecraftRunning = running;
+      send('minecraft-status', { running });
+      if (running) {
+        // Minecraft just launched: arm the hotkey for this session so it doesn't steal Alt+L elsewhere.
+        registerHotkey();
+      } else {
+        // Minecraft closed: release the hotkey, stop treating clipboard copies as coordinate captures, and tuck the overlay away.
+        unregisterHotkey();
+        lastClipboardText = '';
+        if (mainWindow && mainWindow.isVisible()) mainWindow.hide();
+      }
+    });
+  };
+  evaluate();
+  setInterval(evaluate, MINECRAFT_POLL_MS);
+}
+
+function startSyncServer() {
+  syncServer = new WebSocket.Server({ port: SYNC_PORT });
+  syncServer.on('connection', (socket) => {
+    peers.add(socket);
+    socket.send(JSON.stringify({ type: 'snapshot', data: listData(), device: os.hostname() }));
+    send('sync-status', { peers: peers.size, port: SYNC_PORT });
+    socket.on('message', (raw) => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message.type === 'waypoint-upsert' && message.waypoint) {
+        upsertWaypoint(message.waypoint, false);
+        send('data-updated', listData());
+        broadcast(message, socket);
+      } else if (message.type === 'waypoint-delete' && message.id) {
+        database.prepare('DELETE FROM waypoints WHERE id = ?').run(message.id);
+        send('data-updated', listData());
+        broadcast(message, socket);
+      }
+    });
+    socket.on('close', () => {
+      peers.delete(socket);
+      send('sync-status', { peers: peers.size, port: SYNC_PORT });
+    });
+  });
+  syncServer.on('error', (error) => send('sync-error', error.message));
+}
+
+function registerIpc() {
+  ipcMain.handle('data:list', () => listData());
+  ipcMain.handle('waypoint:save', (_event, input) => {
+    const waypoint = {
+      id: input.id || crypto.randomUUID(),
+      world_id: input.world_id,
+      name: String(input.name || 'Unnamed Waypoint').trim() || 'Unnamed Waypoint',
+      category: String(input.category || 'Other'),
+      dimension: input.dimension,
+      x: Number(input.x),
+      y: Number(input.y),
+      z: Number(input.z),
+      nether_x: input.dimension === 'overworld' ? Math.round(input.x / 8) : null,
+      nether_z: input.dimension === 'overworld' ? Math.round(input.z / 8) : null,
+      description: String(input.description || '').trim(),
+      favorite: input.favorite ? 1 : 0,
+      created_at: input.created_at || Date.now(),
+      source_device: input.source_device || os.hostname()
+    };
+    upsertWaypoint(waypoint);
+    const data = listData();
+    send('data-updated', data);
+    return waypoint;
+  });
+  ipcMain.on('waypoint:save-and-close', (_event, input) => {
+    const waypoint = {
+      id: input.id || crypto.randomUUID(),
+      world_id: input.world_id,
+      name: String(input.name || 'Unnamed Waypoint').trim() || 'Unnamed Waypoint',
+      category: String(input.category || 'Other'),
+      dimension: input.dimension,
+      x: Number(input.x),
+      y: Number(input.y),
+      z: Number(input.z),
+      nether_x: input.dimension === 'overworld' ? Math.round(input.x / 8) : null,
+      nether_z: input.dimension === 'overworld' ? Math.round(input.z / 8) : null,
+      description: String(input.description || '').trim(),
+      favorite: input.favorite ? 1 : 0,
+      created_at: input.created_at || Date.now(),
+      source_device: input.source_device || os.hostname()
+    };
+    upsertWaypoint(waypoint);
+    send('data-updated', listData());
+    hideOverlayAndReturnToGame();
+  });
+  ipcMain.handle('waypoint:delete', (_event, id) => {
+    database.prepare('DELETE FROM waypoints WHERE id = ?').run(id);
+    broadcast({ type: 'waypoint-delete', id });
+    const data = listData();
+    send('data-updated', data);
+    return data;
+  });
+  ipcMain.handle('world:save', (_event, input) => {
+    const world = { id: input.id || crypto.randomUUID(), name: String(input.name || '').trim(), created_at: input.created_at || Date.now() };
+    if (!world.name) throw new Error('World name is required.');
+    database.prepare(`
+      INSERT INTO worlds (id, name, created_at) VALUES (@id, @name, @created_at)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name
+    `).run(world);
+    return listData();
+  });
+  ipcMain.handle('world:delete', (_event, id) => {
+    database.prepare('DELETE FROM worlds WHERE id = ?').run(id);
+    return listData();
+  });
+  ipcMain.handle('category:save', (_event, input) => {
+    const category = { id: input.id || crypto.randomUUID(), world_id: input.world_id, name: String(input.name || '').trim(), created_at: input.created_at || Date.now() };
+    if (!category.name) throw new Error('Category name is required.');
+    database.prepare(`
+      INSERT INTO categories (id, world_id, name, created_at) VALUES (@id, @world_id, @name, @created_at)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, world_id=excluded.world_id
+    `).run(category);
+    return listData();
+  });
+  ipcMain.handle('category:delete', (_event, id) => {
+    database.prepare('DELETE FROM categories WHERE id = ?').run(id);
+    return listData();
+  });
+  ipcMain.handle('sync:connect', (_event, address) => {
+    const socket = new WebSocket(address);
+    syncClients.add(socket);
+    socket.on('open', () => send('sync-status', { connected: true, address }));
+    socket.on('message', (raw) => {
+      let message;
+      try { message = JSON.parse(raw.toString()); } catch { return; }
+      if (message.type === 'snapshot' && message.data) {
+        mergeSnapshot(message.data);
+        send('data-updated', listData());
+      } else if (message.type === 'waypoint-upsert' && message.waypoint) {
+        upsertWaypoint(message.waypoint, false);
+        send('data-updated', listData());
+      } else if (message.type === 'waypoint-delete' && message.id) {
+        database.prepare('DELETE FROM waypoints WHERE id = ?').run(message.id);
+        send('data-updated', listData());
+      }
+    });
+    socket.on('error', (error) => send('sync-error', error.message));
+    socket.on('close', () => { syncClients.delete(socket); send('sync-status', { connected: false }); });
+    return true;
+  });
+  ipcMain.on('window:hide', () => hideOverlayAndReturnToGame());
+  ipcMain.on('window:toggle', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isVisible()) hideOverlayAndReturnToGame(); else showAndFocusOverlay();
+  });
+  ipcMain.handle('window:get-pinned', () => isPinned());
+  ipcMain.handle('window:set-pinned', (_event, pinned) => {
+    setSetting('pinned', pinned ? '1' : '0');
+    if (mainWindow) mainWindow.setAlwaysOnTop(pinned);
+    return pinned;
+  });
+}
+
+app.whenReady().then(() => {
+  createDatabase();
+  registerIpc();
+  createWindow();
+  createTray();
+  startClipboardPoll();
+  startSyncServer();
+  startMinecraftWatcher();
+});
+
+app.on('before-quit', () => { isQuitting = true; });
+
+app.on('will-quit', () => {
+  unregisterHotkey();
+  if (syncServer) syncServer.close();
+  if (database) database.close();
+});

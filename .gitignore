@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+*.log
+waypoints.db
+waypoints.db-journal
+waypoints.db-wal
+waypoints.db-shm
+
+# Design source files - not needed at runtime, excluded from packaging
+art/
+*.af
+*.psd
+*.ai

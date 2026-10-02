@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minecraft Field Notes</title>
+  <link rel="icon" href="assets/app-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="titlebar">
+      <div><span class="eyebrow">ACHIEVEMENT-SAFE COMPANION</span><h1>Field Notes</h1></div>
+      <div class="titlebar-actions">
+        <button id="pinBtn" class="icon-button" title="Keep window on top">📌</button>
+        <button id="closeBtn" class="icon-button" title="Hide overlay">×</button>
+      </div>
+    </header>
+    <section class="toolbar">
+      <span id="minecraftStatus" class="status offline"><i class="offline"></i> Waiting for Minecraft</span>
+      <span id="syncStatus" class="status"><i></i> LAN ready</span>
+      <button id="settingsBtn" class="subtle-button">Manage</button>
+    </section>
+    <section class="capture-card">
+      <div class="section-heading"><span>New waypoint</span><span id="captureHint">Copy coordinates in Minecraft</span></div>
+      <div id="coordsDisplay" class="coordinates">Waiting for CTRL + ALT + C...</div>
+      <div class="grid two">
+        <label>Name<input id="wpName" placeholder="Home, spawner, village..."></label>
+        <label>World<select id="wpWorld"></select></label>
+      </div>
+      <div class="grid two">
+        <label>Category<select id="wpCategory"></select></label>
+        <label>Dimension<select id="wpDimension"><option value="overworld">Overworld</option><option value="nether">Nether</option><option value="the_end">The End</option></select></label>
+      </div>
+      <label>Description<textarea id="wpDescription" rows="2" placeholder="Optional notes"></textarea></label>
+      <div id="conversionDisplay" class="conversion">Portal target: —</div>
+      <div class="actions"><label class="favorite"><input type="checkbox" id="wpFavorite"> Pin waypoint</label><button id="saveBtn" class="primary">Save waypoint</button></div>
+    </section>
+    <section class="list-section">
+      <div class="section-heading"><span>Saved waypoints</span><input id="searchInput" class="search" placeholder="Filter notes"></div>
+      <div id="logList" class="log-list"></div>
+    </section>
+    <section id="managePanel" class="manage-panel hidden">
+      <div class="section-heading"><span>Worlds & categories</span><button id="manageClose" class="icon-button">×</button></div>
+      <div class="manage-row"><input id="worldName" placeholder="New world name"><button id="addWorld">Add world</button></div>
+      <div id="worldList"></div>
+      <div class="manage-row"><input id="categoryName" placeholder="New category"><button id="addCategory">Add category</button></div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

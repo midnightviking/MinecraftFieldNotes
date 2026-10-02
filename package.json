@@ -1,0 +1,58 @@
+{
+  "name": "minecraft-field-notes",
+  "productName": "Minecraft Field Notes",
+  "version": "1.0.0",
+  "description": "An achievement-friendly overlay, coordinate logger, and LAN waypoint-sharing companion for Minecraft Bedrock Edition.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win nsis portable",
+    "build:dir": "electron-builder --win portable --dir"
+  },
+  "devDependencies": {
+    "electron": "^28.2.0",
+    "electron-builder": "^24.13.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "ws": "^8.16.0"
+  },
+  "build": {
+    "appId": "com.fieldnotes.minecraft",
+    "productName": "Minecraft Field Notes",
+    "icon": "build/icon.ico",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "build/icon.ico",
+      "package.json",
+      "!renderer/**/*.map"
+    ],
+    "extraResources": [],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Minecraft Field Notes"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
+  }
+}
