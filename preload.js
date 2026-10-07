@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('fieldNotes', {
   deleteWorld: (id) => ipcRenderer.invoke('world:delete', id),
   saveCategory: (category) => ipcRenderer.invoke('category:save', category),
   deleteCategory: (id) => ipcRenderer.invoke('category:delete', id),
+  moveWaypoint: (id, target, beforeId) => ipcRenderer.invoke('waypoint:move', id, target, beforeId),
   setFavorite: (id, favorite) => ipcRenderer.invoke('waypoint:set-favorite', id, favorite),
   getSetting: (key) => ipcRenderer.invoke('settings:get', key),
   setSetting: (key, value) => ipcRenderer.invoke('settings:set', key, value),

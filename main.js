@@ -65,6 +65,10 @@ function createDatabase() {
     );
   `);
 
+  const waypointColumns = database.prepare('PRAGMA table_info(waypoints)').all();
+  if (!waypointColumns.some((column) => column.name === 'sort_order')) {
+    database.exec('ALTER TABLE waypoints ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  }
   const columns = database.prepare('PRAGMA table_info(categories)').all();
   if (!columns.some((column) => column.name === 'icon')) {
     database.exec("ALTER TABLE categories ADD COLUMN icon TEXT NOT NULL DEFAULT 'bookmark'");
@@ -97,14 +101,15 @@ function normalizeWaypoint(input) {
     description: String(input.description || '').trim(),
     favorite: input.favorite ? 1 : 0,
     created_at: input.created_at || Date.now(),
-    source_device: input.source_device || os.hostname()
+    source_device: input.source_device || os.hostname(),
+    sort_order: Number(input.sort_order) || 0
   };
 }
 
 function listData() {
   const worlds = database.prepare('SELECT * FROM worlds ORDER BY name COLLATE NOCASE').all();
   const categories = database.prepare('SELECT * FROM categories ORDER BY name COLLATE NOCASE').all();
-  const waypoints = database.prepare('SELECT * FROM waypoints ORDER BY favorite DESC, created_at DESC').all();
+  const waypoints = database.prepare('SELECT * FROM waypoints ORDER BY favorite DESC, sort_order ASC, created_at DESC').all();
   return { worlds, categories, waypoints };
 }
 
@@ -166,16 +171,17 @@ function upsertWaypoint(waypoint, shouldBroadcast = true) {
   database.prepare(`
     INSERT INTO waypoints (
       id, world_id, name, category, dimension, x, y, z, nether_x, nether_z,
-      description, favorite, created_at, source_device
+      description, favorite, created_at, source_device, sort_order
     ) VALUES (@id, @world_id, @name, @category, @dimension, @x, @y, @z, @nether_x, @nether_z,
-      @description, @favorite, @created_at, @source_device)
+      @description, @favorite, @created_at, @source_device, @sort_order)
     ON CONFLICT(id) DO UPDATE SET
       world_id=excluded.world_id, name=excluded.name, category=excluded.category,
       dimension=excluded.dimension, x=excluded.x, y=excluded.y, z=excluded.z,
       nether_x=excluded.nether_x, nether_z=excluded.nether_z,
       description=excluded.description, favorite=excluded.favorite,
-      created_at=excluded.created_at, source_device=excluded.source_device
-  `).run(waypoint);
+      created_at=excluded.created_at, source_device=excluded.source_device,
+      sort_order=excluded.sort_order
+  `).run({ ...waypoint, sort_order: Number(waypoint.sort_order) || 0 });
   if (shouldBroadcast) broadcast({ type: 'waypoint-upsert', waypoint });
 }
 
@@ -367,6 +373,31 @@ function registerIpc() {
   ipcMain.handle('waypoint:delete', (_event, id) => {
     database.prepare('DELETE FROM waypoints WHERE id = ?').run(id);
     broadcast({ type: 'waypoint-delete', id });
+    return listData();
+  });
+  ipcMain.handle('waypoint:move', (_event, id, target, beforeId) => {
+    const moved = database.prepare('SELECT * FROM waypoints WHERE id = ?').get(id);
+    if (!moved) return listData();
+    database.transaction(() => {
+      let siblings;
+      if (target.pinned) {
+        siblings = database.prepare(
+          'SELECT id FROM waypoints WHERE world_id = ? AND favorite = 1 AND id != ? ORDER BY sort_order ASC, created_at DESC'
+        ).all(moved.world_id, id);
+      } else {
+        database.prepare('UPDATE waypoints SET category = ? WHERE id = ?').run(String(target.category), id);
+        siblings = database.prepare(
+          'SELECT id FROM waypoints WHERE world_id = ? AND favorite = 0 AND category = ? AND id != ? ORDER BY sort_order ASC, created_at DESC'
+        ).all(moved.world_id, String(target.category), id);
+      }
+      const ids = siblings.map((row) => row.id);
+      const index = beforeId ? ids.indexOf(beforeId) : -1;
+      ids.splice(index === -1 ? ids.length : index, 0, id);
+      const update = database.prepare('UPDATE waypoints SET sort_order = ? WHERE id = ?');
+      ids.forEach((waypointId, position) => update.run(position + 1, waypointId));
+    })();
+    const changed = database.prepare('SELECT * FROM waypoints WHERE world_id = ?').all(moved.world_id);
+    changed.forEach((waypoint) => broadcast({ type: 'waypoint-upsert', waypoint }));
     return listData();
   });
   ipcMain.handle('waypoint:set-favorite', (_event, id, favorite) => {

@@ -5,7 +5,7 @@ let data = { worlds: [], categories: [], waypoints: [] };
 let currentWorldId = null;
 let currentCoords = null;
 let activeTab = 'capture';
-const ui = { editingWorld: null, confirmWorld: null, picker: null, newCategoryIcon: 'bookmark' };
+const ui = { editingWaypoint: null, dragId: null, editingWorld: null, confirmWorld: null, picker: null, newCategoryIcon: 'bookmark' };
 const collapsed = new Set(JSON.parse(localStorage.getItem('collapsedGroups') || '[]'));
 
 const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
@@ -121,15 +121,45 @@ function groupWaypoints(items) {
   return groups;
 }
 
+function editCard(w) {
+  const categories = worldCategories().map((c) => c.name);
+  if (!categories.includes(w.category)) categories.push(w.category);
+  const options = categories.map((name) => `<option value="${escapeHtml(name)}" ${name === w.category ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+  const dimensions = Object.entries(DIMENSION_LABELS).map(([key, label]) => `<option value="${key}" ${key === w.dimension ? 'selected' : ''}>${label}</option>`).join('');
+  return `<article class="card editing" data-edit-card="${w.id}">
+    <div class="form">
+      <label>Name<input data-field="name" value="${escapeHtml(w.name)}" autocomplete="off"></label>
+      <div class="grid two">
+        <label>Category<select data-field="category">${options}</select></label>
+        <label>Dimension<select data-field="dimension">${dimensions}</select></label>
+      </div>
+      <div class="grid three">
+        <label>X<input data-field="x" type="number" value="${w.x}"></label>
+        <label>Y<input data-field="y" type="number" value="${w.y}"></label>
+        <label>Z<input data-field="z" type="number" value="${w.z}"></label>
+      </div>
+      <label>Notes<textarea data-field="description" rows="3" placeholder="Optional notes">${escapeHtml(w.description)}</textarea></label>
+      <div class="actions">
+        <button class="secondary" data-action="edit-cancel">Cancel</button>
+        <button class="primary" data-action="edit-save" data-id="${w.id}">Save changes</button>
+      </div>
+    </div>
+  </article>`;
+}
+
 function waypointCard(w) {
+  if (ui.editingWaypoint === w.id) return editCard(w);
+  const draggable = !$('searchInput').value.trim();
   const portal = w.dimension === 'overworld' && w.nether_x != null
     ? `Nether portal → X ${w.nether_x}, Z ${w.nether_z}`
     : w.dimension === 'nether' ? `Overworld portal → X ${w.x * 8}, Z ${w.z * 8}` : '';
-  return `<article class="card ${w.favorite ? 'pinned' : ''}">
+  return `<article class="card ${w.favorite ? 'pinned' : ''}" data-card="${w.id}" ${draggable ? 'draggable="true"' : ''}>
     <div class="card-head">
+      ${draggable ? `<span class="grip" title="Drag to reorder or move to another category">${svg('grip', 16)}</span>` : ''}
       <span class="card-name">${escapeHtml(w.name)}</span>
       <span class="card-actions">
         <button class="mini-button ${w.favorite ? 'active' : ''}" data-action="favorite" data-id="${w.id}" title="${w.favorite ? 'Unpin' : 'Pin to top'}">${svg(w.favorite ? 'starFilled' : 'star', 16)}</button>
+        <button class="mini-button" data-action="edit" data-id="${w.id}" title="Edit">${svg('edit', 16)}</button>
         <button class="mini-button danger" data-action="delete" data-id="${w.id}" title="Delete">${svg('trash', 16)}</button>
       </span>
     </div>
@@ -157,7 +187,7 @@ function renderJournal() {
   $('journalList').innerHTML = groupWaypoints(items).map((group) => {
     const id = `${currentWorldId}:${group.key}`;
     const isCollapsed = !query && collapsed.has(id);
-    return `<section class="group ${isCollapsed ? 'collapsed' : ''}">
+    return `<section class="group ${isCollapsed ? 'collapsed' : ''}" data-group-key="${escapeHtml(group.key)}">
       <button class="group-header" data-action="toggle" data-group="${escapeHtml(id)}">
         <span class="chevron">${svg('chevron', 16)}</span>
         <span class="group-icon">${svg(group.icon, 20)}</span>
@@ -273,6 +303,24 @@ $('journalList').addEventListener('click', async (event) => {
   } else if (action === 'favorite') {
     const item = data.waypoints.find((w) => w.id === id);
     await run(async () => applyData(await api.setFavorite(id, !item.favorite)));
+  } else if (action === 'edit') {
+    ui.editingWaypoint = id;
+    renderJournal();
+    document.querySelector('[data-edit-card] [data-field=name]').focus();
+  } else if (action === 'edit-cancel') {
+    ui.editingWaypoint = null;
+    renderJournal();
+  } else if (action === 'edit-save') {
+    const card = button.closest('[data-edit-card]');
+    const field = (name) => card.querySelector('[data-field=' + name + ']').value;
+    const original = data.waypoints.find((w) => w.id === id);
+    const coords = ['x', 'y', 'z'].map((axis) => Number(field(axis)));
+    if (coords.some((value) => !Number.isFinite(value))) return toast('Coordinates must be numbers.', true);
+    const updated = { ...original, name: field('name'), category: field('category'), dimension: field('dimension'),
+      x: Math.round(coords[0]), y: Math.round(coords[1]), z: Math.round(coords[2]), description: field('description') };
+    await api.saveWaypoint(updated);
+    ui.editingWaypoint = null;
+    toast('Waypoint updated');
   } else if (action === 'copy') {
     const item = data.waypoints.find((w) => w.id === id);
     await api.copyText(`${item.x} ${item.y} ${item.z}`);
@@ -286,6 +334,53 @@ $('journalList').addEventListener('click', async (event) => {
       setTimeout(() => button.classList.remove('confirm'), 2500);
     }
   }
+});
+
+/* Drag to reorder / move between categories */
+function dropTarget(group, event) {
+  const source = data.waypoints.find((w) => w.id === ui.dragId);
+  if (!source || !group) return null;
+  const pinnedGroup = group.dataset.groupKey === '__pinned';
+  if (Boolean(source.favorite) !== pinnedGroup) return null;
+  const cards = [...group.querySelectorAll('[data-card]')].filter((card) => card.dataset.card !== ui.dragId);
+  const before = cards.find((card) => {
+    const box = card.getBoundingClientRect();
+    return event.clientY < box.top + box.height / 2;
+  });
+  return { group, pinnedGroup, before: before || null };
+}
+function clearDropMarks() {
+  document.querySelectorAll('.drop-before, .drop-end, .drop-over').forEach((el) => el.classList.remove('drop-before', 'drop-end', 'drop-over'));
+}
+$('journalList').addEventListener('dragstart', (event) => {
+  const card = event.target.closest('[data-card]');
+  if (!card) return;
+  ui.dragId = card.dataset.card;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', ui.dragId);
+  setTimeout(() => card.classList.add('dragging'), 0);
+});
+$('journalList').addEventListener('dragover', (event) => {
+  const target = dropTarget(event.target.closest('.group'), event);
+  if (!target) return;
+  event.preventDefault();
+  clearDropMarks();
+  target.group.classList.add('drop-over');
+  (target.before ? target.before : target.group.querySelector('.group-body')).classList.add(target.before ? 'drop-before' : 'drop-end');
+});
+$('journalList').addEventListener('drop', async (event) => {
+  const target = dropTarget(event.target.closest('.group'), event);
+  clearDropMarks();
+  if (!target) return;
+  event.preventDefault();
+  const dragId = ui.dragId;
+  const destination = target.pinnedGroup ? { pinned: true } : { category: target.group.dataset.groupKey };
+  await run(async () => applyData(await api.moveWaypoint(dragId, destination, target.before ? target.before.dataset.card : null)));
+});
+$('journalList').addEventListener('dragend', () => {
+  ui.dragId = null;
+  clearDropMarks();
+  document.querySelectorAll('.dragging').forEach((el) => el.classList.remove('dragging'));
 });
 
 /* Worlds actions */

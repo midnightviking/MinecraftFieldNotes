@@ -193,3 +193,13 @@ kbd { padding: 1px 6px; background: var(--leather-2); border: 1px solid var(--st
 .welcome-card p { margin: 0; color: var(--ink-dim); }
 .welcome-card input { text-align: center; }
 .error { min-height: 1em; color: var(--danger) !important; font-size: 13px; }
+
+/* Edit + drag */
+.grid.three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+.card.editing { border-color: var(--brass); }
+.grip { display: grid; place-items: center; color: var(--ink-dim); cursor: grab; opacity: 0.6; }
+.card:hover .grip { opacity: 1; color: var(--brass); }
+.card.dragging { opacity: 0.4; }
+.group.drop-over > .group-header { border-color: var(--brass); }
+.card.drop-before { box-shadow: 0 -3px 0 0 var(--brass), var(--shadow); }
+.group-body.drop-end { box-shadow: inset 0 -3px 0 0 var(--brass); }
