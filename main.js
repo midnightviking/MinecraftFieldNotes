@@ -10,6 +10,10 @@ const SYNC_PORT = 17321;
 const COORDINATE_PATTERN = /(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)[,\s]+(-?\d+(?:\.\d+)?)/;
 const MINECRAFT_PROCESS_NAME = 'Minecraft.Windows.exe';
 const MINECRAFT_POLL_MS = 2000;
+const DEFAULT_CATEGORIES = [
+  ['Home', 'home'], ['Villages', 'village'], ['Nether Portals', 'portal'], ['Farms', 'farm'],
+  ['Base', 'castle'], ['POI', 'pin'], ['Ancient Cities', 'ruins'], ['Other', 'bookmark']
+];
 let mainWindow;
 let database;
 let syncServer;
@@ -61,16 +65,40 @@ function createDatabase() {
     );
   `);
 
-  if (!database.prepare('SELECT 1 FROM worlds LIMIT 1').get()) {
-    const now = Date.now();
-    const worldId = crypto.randomUUID();
-    database.prepare('INSERT INTO worlds (id, name, created_at) VALUES (?, ?, ?)').run(worldId, 'My World', now);
-    const insertCategory = database.prepare(
-      'INSERT INTO categories (id, world_id, name, created_at) VALUES (?, ?, ?, ?)'
-    );
-    ['Home', 'Villages', 'Nether Portals', 'Farms', 'Base', 'POI', 'Ancient Cities', 'Other']
-      .forEach((name) => insertCategory.run(crypto.randomUUID(), worldId, name, now));
+  const columns = database.prepare('PRAGMA table_info(categories)').all();
+  if (!columns.some((column) => column.name === 'icon')) {
+    database.exec("ALTER TABLE categories ADD COLUMN icon TEXT NOT NULL DEFAULT 'bookmark'");
+    const setIcon = database.prepare('UPDATE categories SET icon = ? WHERE name = ?');
+    DEFAULT_CATEGORIES.forEach(([name, icon]) => setIcon.run(icon, name));
   }
+}
+
+function seedDefaultCategories(worldId) {
+  const insert = database.prepare(
+    'INSERT OR IGNORE INTO categories (id, world_id, name, icon, created_at) VALUES (?, ?, ?, ?, ?)'
+  );
+  const now = Date.now();
+  DEFAULT_CATEGORIES.forEach(([name, icon]) => insert.run(crypto.randomUUID(), worldId, name, icon, now));
+}
+
+function normalizeWaypoint(input) {
+  const overworld = input.dimension === 'overworld';
+  return {
+    id: input.id || crypto.randomUUID(),
+    world_id: input.world_id,
+    name: String(input.name || 'Unnamed Waypoint').trim() || 'Unnamed Waypoint',
+    category: String(input.category || 'Other'),
+    dimension: input.dimension,
+    x: Number(input.x),
+    y: Number(input.y),
+    z: Number(input.z),
+    nether_x: overworld ? Math.round(input.x / 8) : null,
+    nether_z: overworld ? Math.round(input.z / 8) : null,
+    description: String(input.description || '').trim(),
+    favorite: input.favorite ? 1 : 0,
+    created_at: input.created_at || Date.now(),
+    source_device: input.source_device || os.hostname()
+  };
 }
 
 function listData() {
@@ -123,9 +151,9 @@ function mergeSnapshot(snapshot) {
     const existing = database.prepare('SELECT id FROM categories WHERE world_id = ? AND name = ?').get(worldId, category.name);
     const id = existing ? existing.id : category.id;
     database.prepare(`
-      INSERT INTO categories (id, world_id, name, created_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name, world_id=excluded.world_id
-    `).run(id, worldId, category.name, category.created_at);
+      INSERT INTO categories (id, world_id, name, icon, created_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name, world_id=excluded.world_id, icon=excluded.icon
+    `).run(id, worldId, category.name, category.icon || 'bookmark', category.created_at);
   }
   for (const waypoint of snapshot.waypoints || []) {
     const worldId = worldIds.get(waypoint.world_id) || waypoint.world_id;
@@ -326,82 +354,84 @@ function startSyncServer() {
 function registerIpc() {
   ipcMain.handle('data:list', () => listData());
   ipcMain.handle('waypoint:save', (_event, input) => {
-    const waypoint = {
-      id: input.id || crypto.randomUUID(),
-      world_id: input.world_id,
-      name: String(input.name || 'Unnamed Waypoint').trim() || 'Unnamed Waypoint',
-      category: String(input.category || 'Other'),
-      dimension: input.dimension,
-      x: Number(input.x),
-      y: Number(input.y),
-      z: Number(input.z),
-      nether_x: input.dimension === 'overworld' ? Math.round(input.x / 8) : null,
-      nether_z: input.dimension === 'overworld' ? Math.round(input.z / 8) : null,
-      description: String(input.description || '').trim(),
-      favorite: input.favorite ? 1 : 0,
-      created_at: input.created_at || Date.now(),
-      source_device: input.source_device || os.hostname()
-    };
+    const waypoint = normalizeWaypoint(input);
     upsertWaypoint(waypoint);
-    const data = listData();
-    send('data-updated', data);
+    send('data-updated', listData());
     return waypoint;
   });
   ipcMain.on('waypoint:save-and-close', (_event, input) => {
-    const waypoint = {
-      id: input.id || crypto.randomUUID(),
-      world_id: input.world_id,
-      name: String(input.name || 'Unnamed Waypoint').trim() || 'Unnamed Waypoint',
-      category: String(input.category || 'Other'),
-      dimension: input.dimension,
-      x: Number(input.x),
-      y: Number(input.y),
-      z: Number(input.z),
-      nether_x: input.dimension === 'overworld' ? Math.round(input.x / 8) : null,
-      nether_z: input.dimension === 'overworld' ? Math.round(input.z / 8) : null,
-      description: String(input.description || '').trim(),
-      favorite: input.favorite ? 1 : 0,
-      created_at: input.created_at || Date.now(),
-      source_device: input.source_device || os.hostname()
-    };
-    upsertWaypoint(waypoint);
+    upsertWaypoint(normalizeWaypoint(input));
     send('data-updated', listData());
     hideOverlayAndReturnToGame();
   });
   ipcMain.handle('waypoint:delete', (_event, id) => {
     database.prepare('DELETE FROM waypoints WHERE id = ?').run(id);
     broadcast({ type: 'waypoint-delete', id });
-    const data = listData();
-    send('data-updated', data);
-    return data;
+    return listData();
+  });
+  ipcMain.handle('waypoint:set-favorite', (_event, id, favorite) => {
+    database.prepare('UPDATE waypoints SET favorite = ? WHERE id = ?').run(favorite ? 1 : 0, id);
+    const waypoint = database.prepare('SELECT * FROM waypoints WHERE id = ?').get(id);
+    if (waypoint) broadcast({ type: 'waypoint-upsert', waypoint });
+    return listData();
   });
   ipcMain.handle('world:save', (_event, input) => {
-    const world = { id: input.id || crypto.randomUUID(), name: String(input.name || '').trim(), created_at: input.created_at || Date.now() };
-    if (!world.name) throw new Error('World name is required.');
+    const name = String(input.name || '').trim();
+    if (!name) throw new Error('World name is required.');
+    const id = input.id || crypto.randomUUID();
+    const duplicate = database.prepare('SELECT id FROM worlds WHERE name = ? COLLATE NOCASE AND id != ?').get(name, id);
+    if (duplicate) throw new Error('A world with that name already exists.');
+    const isNew = !database.prepare('SELECT 1 FROM worlds WHERE id = ?').get(id);
     database.prepare(`
-      INSERT INTO worlds (id, name, created_at) VALUES (@id, @name, @created_at)
+      INSERT INTO worlds (id, name, created_at) VALUES (?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET name=excluded.name
-    `).run(world);
-    return listData();
+    `).run(id, name, Date.now());
+    if (isNew) seedDefaultCategories(id);
+    return { ...listData(), savedId: id };
   });
   ipcMain.handle('world:delete', (_event, id) => {
     database.prepare('DELETE FROM worlds WHERE id = ?').run(id);
     return listData();
   });
   ipcMain.handle('category:save', (_event, input) => {
-    const category = { id: input.id || crypto.randomUUID(), world_id: input.world_id, name: String(input.name || '').trim(), created_at: input.created_at || Date.now() };
-    if (!category.name) throw new Error('Category name is required.');
-    database.prepare(`
-      INSERT INTO categories (id, world_id, name, created_at) VALUES (@id, @world_id, @name, @created_at)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name, world_id=excluded.world_id
-    `).run(category);
+    const name = String(input.name || '').trim();
+    if (!name) throw new Error('Category name is required.');
+    const icon = String(input.icon || 'bookmark');
+    const previous = input.id ? database.prepare('SELECT * FROM categories WHERE id = ?').get(input.id) : null;
+    const duplicate = database.prepare(
+      'SELECT id FROM categories WHERE world_id = ? AND name = ? COLLATE NOCASE AND id != ?'
+    ).get(input.world_id, name, input.id || '');
+    if (duplicate) throw new Error('That category already exists in this world.');
+    database.transaction(() => {
+      if (previous) {
+        database.prepare('UPDATE categories SET name = ?, icon = ? WHERE id = ?').run(name, icon, previous.id);
+        if (previous.name !== name) {
+          database.prepare('UPDATE waypoints SET category = ? WHERE world_id = ? AND category = ?')
+            .run(name, previous.world_id, previous.name);
+        }
+      } else {
+        database.prepare('INSERT INTO categories (id, world_id, name, icon, created_at) VALUES (?, ?, ?, ?, ?)')
+          .run(crypto.randomUUID(), input.world_id, name, icon, Date.now());
+      }
+    })();
     return listData();
   });
   ipcMain.handle('category:delete', (_event, id) => {
-    database.prepare('DELETE FROM categories WHERE id = ?').run(id);
+    const category = database.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+    if (category) {
+      database.prepare("UPDATE waypoints SET category = 'Other' WHERE world_id = ? AND category = ?")
+        .run(category.world_id, category.name);
+      database.prepare('DELETE FROM categories WHERE id = ?').run(id);
+    }
     return listData();
   });
-  ipcMain.handle('sync:connect', (_event, address) => {
+  ipcMain.handle('settings:get', (_event, key) => getSetting(key, null));
+  ipcMain.handle('settings:set', (_event, key, value) => { setSetting(String(key), String(value)); return true; });
+  ipcMain.handle('clipboard:write', (_event, text) => {
+    lastClipboardText = String(text);
+    clipboard.writeText(lastClipboardText);
+    return true;
+  });  ipcMain.handle('sync:connect', (_event, address) => {
     const socket = new WebSocket(address);
     syncClients.add(socket);
     socket.on('open', () => send('sync-status', { connected: true, address }));

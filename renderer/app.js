@@ -1,120 +1,410 @@
-let data = { worlds: [], categories: [], waypoints: [] };
-let currentCoords = null;
-
-const $ = (id) => document.getElementById(id);
 const api = window.fieldNotes;
+const $ = (id) => document.getElementById(id);
 
-function selectedWorld() { return $('wpWorld').value; }
-function worldCategories() { return data.categories.filter((category) => category.world_id === selectedWorld()); }
+let data = { worlds: [], categories: [], waypoints: [] };
+let currentWorldId = null;
+let currentCoords = null;
+let activeTab = 'capture';
+const ui = { editingWorld: null, confirmWorld: null, picker: null, newCategoryIcon: 'bookmark' };
+const collapsed = new Set(JSON.parse(localStorage.getItem('collapsedGroups') || '[]'));
 
-function renderSelectors() {
-  const world = selectedWorld();
-  $('wpWorld').innerHTML = data.worlds.map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join('');
-  if (world && data.worlds.some((item) => item.id === world)) $('wpWorld').value = world;
-  if (!data.worlds.length) $('wpWorld').innerHTML = '<option value="">Create a world in Manage</option>';
+const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
+const DIMENSION_LABELS = { overworld: 'Overworld', nether: 'Nether', the_end: 'The End' };
+
+function hydrateIcons(root = document) {
+  root.querySelectorAll('[data-icon]').forEach((el) => { el.innerHTML = svg(el.dataset.icon); });
+}
+
+let toastTimer;
+function toast(message, isError = false) {
+  const el = $('toast');
+  el.textContent = message;
+  el.classList.toggle('error', isError);
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+const errorMessage = (error) => String(error && error.message || error).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+
+async function run(action) {
+  try { return await action(); } catch (error) { toast(errorMessage(error), true); return null; }
+}
+
+function applyData(next) {
+  data = next;
+  if (!data.worlds.some((world) => world.id === currentWorldId)) {
+    currentWorldId = data.worlds[0] ? data.worlds[0].id : null;
+    if (currentWorldId) api.setSetting('current_world', currentWorldId);
+  }
+  renderAll();
+}
+
+function setCurrentWorld(id) {
+  currentWorldId = id;
+  ui.picker = null;
+  api.setSetting('current_world', id);
+  renderAll();
+}
+
+const worldCategories = () => data.categories.filter((c) => c.world_id === currentWorldId);
+const worldWaypoints = () => data.waypoints.filter((w) => w.world_id === currentWorldId);
+const categoryIcon = (name) => (data.categories.find((c) => c.world_id === currentWorldId && c.name === name) || {}).icon || 'bookmark';
+
+/* Tabs */
+function showTab(name) {
+  activeTab = name;
+  document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.tab === name));
+  document.querySelectorAll('.pane').forEach((pane) => pane.classList.toggle('active', pane.dataset.pane === name));
+}
+document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => showTab(tab.dataset.tab)));
+
+/* Rendering */
+function renderAll() {
+  const hasWorld = data.worlds.length > 0;
+  $('welcome').classList.toggle('hidden', hasWorld);
+  if (!hasWorld) setTimeout(() => $('welcomeName').focus(), 0);
+  renderWorldSelect();
+  renderCaptureOptions();
+  renderJournal();
+  renderWorlds();
+  $('journalCount').textContent = worldWaypoints().length || '';
+}
+
+function renderWorldSelect() {
+  $('worldSelect').innerHTML = data.worlds.map((w) => `<option value="${w.id}">${escapeHtml(w.name)}</option>`).join('');
+  if (currentWorldId) $('worldSelect').value = currentWorldId;
+}
+
+function renderCaptureOptions() {
+  const previous = $('wpCategory').value;
   const categories = worldCategories();
-  $('wpCategory').innerHTML = categories.map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)}</option>`).join('');
-  if (!categories.length) $('wpCategory').innerHTML = '<option>Other</option>';
+  $('wpCategory').innerHTML = (categories.length ? categories : [{ name: 'Other' }])
+    .map((c) => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('');
+  if (categories.some((c) => c.name === previous)) $('wpCategory').value = previous;
+  updateCategoryPreview();
   updateConversion();
 }
 
-function renderWaypoints() {
-  const query = $('searchInput').value.toLowerCase();
-  const visible = data.waypoints.filter((item) => {
-    const world = data.worlds.find((candidate) => candidate.id === item.world_id);
-    return item.name.toLowerCase().includes(query) || item.category.toLowerCase().includes(query) ||
-      (world && world.name.toLowerCase().includes(query)) || item.description.toLowerCase().includes(query);
-  });
-  $('logList').innerHTML = visible.length ? visible.map((item) => {
-    const dimension = item.dimension === 'the_end' ? 'The End' : item.dimension[0].toUpperCase() + item.dimension.slice(1);
-    const world = data.worlds.find((candidate) => candidate.id === item.world_id);
-    return `<article class="log-item ${item.favorite ? 'favorite-item' : ''}">
-      <div class="section-heading"><div class="log-main"><span class="log-name">${escapeHtml(item.name)}</span> <span class="log-description">${escapeHtml(item.category)} · ${escapeHtml(world ? world.name : 'Unknown world')}</span>
-      <div class="log-meta">${item.x}, ${item.y}, ${item.z} · ${dimension}</div>${item.description ? `<div class="log-description">${escapeHtml(item.description)}</div>` : ''}</div>
-      <div class="item-buttons"><button data-favorite="${item.id}" title="Pin">${item.favorite ? '★' : '☆'}</button><button data-delete="${item.id}" title="Delete">×</button></div></div></article>`;
-  }).join('') : '<div class="empty">No waypoints yet. Copy coordinates from Minecraft to begin.</div>';
-  document.querySelectorAll('[data-delete]').forEach((button) => button.addEventListener('click', () => api.deleteWaypoint(button.dataset.delete)));
-  document.querySelectorAll('[data-favorite]').forEach((button) => button.addEventListener('click', () => {
-    const item = data.waypoints.find((waypoint) => waypoint.id === button.dataset.favorite);
-    api.saveWaypoint({ ...item, favorite: !item.favorite });
-  }));
+function updateCategoryPreview() {
+  $('catPreview').innerHTML = svg(categoryIcon($('wpCategory').value), 20);
 }
 
-function renderManage() {
-  $('worldList').innerHTML = data.worlds.map((world) => {
-    const categories = data.categories.filter((category) => category.world_id === world.id);
-    return `<div class="world-entry"><div><strong>${escapeHtml(world.name)}</strong><div class="log-description">${categories.map((category) => `<span>${escapeHtml(category.name)} <button data-category-delete="${category.id}" title="Delete category">×</button></span>`).join(' · ')}</div></div><button data-world-delete="${world.id}">Delete</button></div>`;
-  }).join('');
-  document.querySelectorAll('[data-world-delete]').forEach((button) => button.addEventListener('click', async () => {
-    if (data.worlds.length === 1) return showError('Keep at least one world.');
-    data = await api.deleteWorld(button.dataset.worldDelete); renderAll();
-  }));
-  document.querySelectorAll('[data-category-delete]').forEach((button) => button.addEventListener('click', async () => {
-    data = await api.deleteCategory(button.dataset.categoryDelete); renderAll();
-  }));
-}
-
-function renderAll() { renderSelectors(); renderWaypoints(); renderManage(); }
 function updateConversion() {
-  if (!currentCoords) { $('conversionDisplay').textContent = 'Portal target: —'; return; }
+  const el = $('conversionDisplay');
+  if (!currentCoords) { el.textContent = 'Portal target: —'; return; }
   const dimension = $('wpDimension').value;
-  if (dimension === 'overworld') $('conversionDisplay').textContent = `Nether portal target: X ${Math.round(currentCoords.x / 8)}, Z ${Math.round(currentCoords.z / 8)}`;
-  else if (dimension === 'nether') $('conversionDisplay').textContent = `Overworld portal target: X ${Math.round(currentCoords.x * 8)}, Z ${Math.round(currentCoords.z * 8)}`;
-  else $('conversionDisplay').textContent = 'The End has no automatic portal conversion.';
+  if (dimension === 'overworld') el.textContent = `Nether portal target: X ${Math.round(currentCoords.x / 8)}, Z ${Math.round(currentCoords.z / 8)}`;
+  else if (dimension === 'nether') el.textContent = `Overworld portal target: X ${Math.round(currentCoords.x * 8)}, Z ${Math.round(currentCoords.z * 8)}`;
+  else el.textContent = 'The End has no automatic portal conversion.';
 }
-function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[character])); }
-function showError(message) { $('captureHint').textContent = message; setTimeout(() => { $('captureHint').textContent = 'Copy coordinates in Minecraft'; }, 3000); }
 
+function renderCoords() {
+  $('coordsDisplay').classList.toggle('empty', !currentCoords);
+  $('coordsValue').textContent = currentCoords
+    ? `X ${currentCoords.x}   Y ${currentCoords.y}   Z ${currentCoords.z}`
+    : 'Press Ctrl + Alt + C in Minecraft';
+}
+
+function groupWaypoints(items) {
+  const groups = [];
+  const pinned = items.filter((w) => w.favorite);
+  if (pinned.length) groups.push({ key: '__pinned', name: 'Pinned', icon: 'star', items: pinned });
+  const rest = items.filter((w) => !w.favorite);
+  const known = new Set();
+  for (const category of worldCategories()) {
+    known.add(category.name);
+    const list = rest.filter((w) => w.category === category.name);
+    if (list.length) groups.push({ key: category.name, name: category.name, icon: category.icon, items: list });
+  }
+  const orphans = [...new Set(rest.filter((w) => !known.has(w.category)).map((w) => w.category))];
+  for (const name of orphans) groups.push({ key: name, name, icon: 'bookmark', items: rest.filter((w) => w.category === name) });
+  return groups;
+}
+
+function waypointCard(w) {
+  const portal = w.dimension === 'overworld' && w.nether_x != null
+    ? `Nether portal → X ${w.nether_x}, Z ${w.nether_z}`
+    : w.dimension === 'nether' ? `Overworld portal → X ${w.x * 8}, Z ${w.z * 8}` : '';
+  return `<article class="card ${w.favorite ? 'pinned' : ''}">
+    <div class="card-head">
+      <span class="card-name">${escapeHtml(w.name)}</span>
+      <span class="card-actions">
+        <button class="mini-button ${w.favorite ? 'active' : ''}" data-action="favorite" data-id="${w.id}" title="${w.favorite ? 'Unpin' : 'Pin to top'}">${svg(w.favorite ? 'starFilled' : 'star', 16)}</button>
+        <button class="mini-button danger" data-action="delete" data-id="${w.id}" title="Delete">${svg('trash', 16)}</button>
+      </span>
+    </div>
+    <div class="card-coords">
+      <span class="coord-stamp">${w.x}, ${w.y}, ${w.z}</span>
+      <button class="mini-button" data-action="copy" data-id="${w.id}" title="Copy coordinates">${svg('copy', 16)}</button>
+      <span class="badge ${w.dimension}">${DIMENSION_LABELS[w.dimension] || w.dimension}</span>
+    </div>
+    ${portal ? `<div class="card-portal">${portal}</div>` : ''}
+    ${w.description ? `<div class="card-notes">${escapeHtml(w.description)}</div>` : ''}
+  </article>`;
+}
+
+function renderJournal() {
+  const all = worldWaypoints();
+  const query = $('searchInput').value.trim().toLowerCase();
+  const items = query
+    ? all.filter((w) => [w.name, w.category, w.description].some((text) => text.toLowerCase().includes(query)))
+    : all;
+  if (!all.length) {
+    $('journalList').innerHTML = '<div class="empty">This world\'s pages are blank.<br>Copy coordinates in Minecraft with Ctrl + Alt + C to add your first waypoint.</div>';
+    return;
+  }
+  if (!items.length) { $('journalList').innerHTML = '<div class="empty">No waypoints match your search.</div>'; return; }
+  $('journalList').innerHTML = groupWaypoints(items).map((group) => {
+    const id = `${currentWorldId}:${group.key}`;
+    const isCollapsed = !query && collapsed.has(id);
+    return `<section class="group ${isCollapsed ? 'collapsed' : ''}">
+      <button class="group-header" data-action="toggle" data-group="${escapeHtml(id)}">
+        <span class="chevron">${svg('chevron', 16)}</span>
+        <span class="group-icon">${svg(group.icon, 20)}</span>
+        <span class="group-name">${escapeHtml(group.name)}</span>
+        <span class="count">${group.items.length}</span>
+      </button>
+      <div class="group-body">${group.items.map(waypointCard).join('')}</div>
+    </section>`;
+  }).join('');
+}
+
+function iconPicker(selected, target) {
+  return `<div class="picker">${Object.keys(CATEGORY_ICONS).map((key) =>
+    `<button class="${key === selected ? 'selected' : ''}" data-action="pick-icon" data-target="${target}" data-icon-key="${key}" title="${key}">${svg(key, 20)}</button>`).join('')}</div>`;
+}
+
+function renderWorlds() {
+  const worldRows = data.worlds.map((world) => {
+    const count = data.waypoints.filter((w) => w.world_id === world.id).length;
+    const current = world.id === currentWorldId;
+    if (ui.editingWorld === world.id) {
+      return `<div class="row current"><input data-world-input="${world.id}" value="${escapeHtml(world.name)}">
+        <button class="mini-button" data-action="world-rename-save" data-id="${world.id}" title="Save">${svg('check', 16)}</button>
+        <button class="mini-button" data-action="world-rename-cancel" title="Cancel">${svg('close', 16)}</button></div>`;
+    }
+    if (ui.confirmWorld === world.id) {
+      return `<div class="row"><span class="row-name">${escapeHtml(world.name)}</span>
+        <span class="confirm-text">Delete${count ? ` ${count} waypoint${count === 1 ? '' : 's'}` : ''}?</span>
+        <button class="mini-button confirm" data-action="world-delete-yes" data-id="${world.id}" title="Confirm delete">${svg('check', 16)}</button>
+        <button class="mini-button" data-action="world-delete-no" title="Cancel">${svg('close', 16)}</button></div>`;
+    }
+    return `<div class="row ${current ? 'current' : ''}">
+      <span class="row-name" data-action="world-select" data-id="${world.id}">${escapeHtml(world.name)}</span>
+      <span class="row-meta">${current ? 'current · ' : ''}${count} waypoint${count === 1 ? '' : 's'}</span>
+      <button class="mini-button" data-action="world-rename" data-id="${world.id}" title="Rename">${svg('edit', 16)}</button>
+      <button class="mini-button danger" data-action="world-delete" data-id="${world.id}" title="Delete">${svg('trash', 16)}</button></div>`;
+  }).join('');
+
+  const currentWorld = data.worlds.find((w) => w.id === currentWorldId);
+  const categoryRows = worldCategories().map((category) => `
+    <div class="row">
+      <button class="mini-button icon-pick" data-action="toggle-picker" data-target="${category.id}" title="Change icon">${svg(category.icon, 20)}</button>
+      <input data-category-input="${category.id}" value="${escapeHtml(category.name)}">
+      <button class="mini-button danger" data-action="category-delete" data-id="${category.id}" title="Delete category">${svg('trash', 16)}</button>
+    </div>${ui.picker === category.id ? iconPicker(category.icon, category.id) : ''}`).join('');
+
+  $('worldsPane').innerHTML = `
+    <div class="section">
+      <h2 class="section-title">Worlds</h2>
+      ${worldRows}
+      <div class="row add"><input id="newWorldName" placeholder="New world name" autocomplete="off">
+        <button class="secondary" data-action="world-add">Add</button></div>
+    </div>
+    ${currentWorld ? `<div class="section">
+      <h2 class="section-title">Categories in ${escapeHtml(currentWorld.name)}</h2>
+      ${categoryRows}
+      <div class="row add">
+        <button class="mini-button icon-pick" data-action="toggle-picker" data-target="new" title="Choose icon">${svg(ui.newCategoryIcon, 20)}</button>
+        <input id="newCategoryName" placeholder="New category" autocomplete="off">
+        <button class="secondary" data-action="category-add">Add</button>
+      </div>
+      ${ui.picker === 'new' ? iconPicker(ui.newCategoryIcon, 'new') : ''}
+    </div>` : ''}`;
+  const editing = document.querySelector('[data-world-input]');
+  if (editing) { editing.focus(); editing.select(); }
+}
+
+/* Capture */
 function quickSaveAndReturn() {
-  if (!currentCoords || !selectedWorld()) return showError('Copy coordinates and select a world first.');
-  api.saveAndClose({ world_id: selectedWorld(), category: $('wpCategory').value, dimension: $('wpDimension').value, ...currentCoords, name: $('wpName').value, description: $('wpDescription').value, favorite: $('wpFavorite').checked });
-  $('wpName').value = ''; $('wpDescription').value = ''; $('wpFavorite').checked = false;
+  if (!currentCoords) return toast('Copy coordinates in Minecraft first.', true);
+  if (!currentWorldId) return toast('Create a world first.', true);
+  api.saveAndClose({
+    world_id: currentWorldId,
+    category: $('wpCategory').value,
+    dimension: $('wpDimension').value,
+    ...currentCoords,
+    name: $('wpName').value,
+    description: $('wpDescription').value,
+    favorite: $('wpFavorite').checked
+  });
+  $('wpName').value = '';
+  $('wpDescription').value = '';
+  $('wpFavorite').checked = false;
+  currentCoords = null;
+  renderCoords();
+  updateConversion();
+  showTab('journal');
 }
 
-api.onCoordinates((coordinates) => {
-  currentCoords = coordinates;
-  $('coordsDisplay').textContent = `X ${coordinates.x}  ·  Y ${coordinates.y}  ·  Z ${coordinates.z}`;
-  updateConversion();
-});
-api.onDataUpdated((updated) => { data = updated; renderAll(); });
-api.onSyncStatus((status) => { $('syncStatus').innerHTML = `<i></i> ${status.connected ? 'Connected to LAN peer' : `${status.peers || 0} LAN peer${status.peers === 1 ? '' : 's'}`}`; });
-api.onSyncError((message) => showError(`Sync error: ${message}`));
-api.onMinecraftStatus((status) => {
-  $('minecraftStatus').innerHTML = status.running
-    ? '<i></i> Minecraft detected'
-    : '<i class="offline"></i> Waiting for Minecraft';
-  $('minecraftStatus').classList.toggle('offline', !status.running);
-});
-// Fired right after Ctrl+Alt+C auto-opens the overlay: jump the caret into the name
-// field so the player can type the waypoint name with zero mouse/Alt+Tab involvement.
-api.onRequestFocusName(() => { $('wpName').focus(); $('wpName').select(); });
-
-$('saveBtn').addEventListener('click', () => quickSaveAndReturn());
+$('saveBtn').addEventListener('click', quickSaveAndReturn);
 $('wpDimension').addEventListener('change', updateConversion);
-$('wpWorld').addEventListener('change', renderSelectors);
-$('searchInput').addEventListener('input', renderWaypoints);
+$('wpCategory').addEventListener('change', updateCategoryPreview);
+$('worldSelect').addEventListener('change', (event) => setCurrentWorld(event.target.value));
+$('searchInput').addEventListener('input', renderJournal);
 $('closeBtn').addEventListener('click', () => api.hide());
-$('pinBtn').addEventListener('click', async () => {
-  const pinned = !$('pinBtn').classList.contains('active');
-  await api.setPinned(pinned);
-  $('pinBtn').classList.toggle('active', pinned);
-  $('pinBtn').title = pinned ? 'Always on top (click to unpin)' : 'Keep window on top';
-});
-$('settingsBtn').addEventListener('click', () => $('managePanel').classList.toggle('hidden'));
-$('manageClose').addEventListener('click', () => $('managePanel').classList.add('hidden'));
-$('addWorld').addEventListener('click', async () => { if (!$('worldName').value.trim()) return; data = await api.saveWorld({ name: $('worldName').value }); $('worldName').value = ''; renderAll(); });
-$('addCategory').addEventListener('click', async () => { if (!$('categoryName').value.trim() || !selectedWorld()) return; data = await api.saveCategory({ world_id: selectedWorld(), name: $('categoryName').value }); $('categoryName').value = ''; renderAll(); });
 
-// Keyboard-only quick capture: Enter anywhere in the capture card saves and snaps focus
-// back to Minecraft; Escape discards and does the same, so the mouse never needs to leave the game.
-document.querySelector('.capture-card').addEventListener('keydown', (event) => {
+// Enter saves and returns to Minecraft; Esc discards. Both keep the mouse out of the loop.
+$('pane-capture').addEventListener('keydown', (event) => {
   if (event.target.tagName === 'TEXTAREA' && event.key === 'Enter' && !event.ctrlKey) return;
   if (event.key === 'Enter') { event.preventDefault(); quickSaveAndReturn(); }
   if (event.key === 'Escape') { event.preventDefault(); api.hide(); }
 });
 
-api.getData().then((initialData) => { data = initialData; renderAll(); });
-api.getPinned().then((pinned) => {
+/* Journal actions */
+$('journalList').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  const { action, id, group } = button.dataset;
+  if (action === 'toggle') {
+    if (collapsed.has(group)) collapsed.delete(group); else collapsed.add(group);
+    localStorage.setItem('collapsedGroups', JSON.stringify([...collapsed]));
+    renderJournal();
+  } else if (action === 'favorite') {
+    const item = data.waypoints.find((w) => w.id === id);
+    await run(async () => applyData(await api.setFavorite(id, !item.favorite)));
+  } else if (action === 'copy') {
+    const item = data.waypoints.find((w) => w.id === id);
+    await api.copyText(`${item.x} ${item.y} ${item.z}`);
+    toast('Coordinates copied');
+  } else if (action === 'delete') {
+    if (button.classList.contains('confirm')) {
+      await run(async () => applyData(await api.deleteWaypoint(id)));
+    } else {
+      button.classList.add('confirm');
+      button.title = 'Click again to delete';
+      setTimeout(() => button.classList.remove('confirm'), 2500);
+    }
+  }
+});
+
+/* Worlds actions */
+$('worldsPane').addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-action]');
+  if (!button) return;
+  const { action, id, target, iconKey } = button.dataset;
+  const rerender = () => renderWorlds();
+
+  if (action === 'world-select') return setCurrentWorld(id);
+  if (action === 'world-rename') { ui.editingWorld = id; return rerender(); }
+  if (action === 'world-rename-cancel') { ui.editingWorld = null; return rerender(); }
+  if (action === 'world-rename-save') {
+    const name = document.querySelector(`[data-world-input="${id}"]`).value;
+    const result = await run(() => api.saveWorld({ id, name }));
+    if (result) { ui.editingWorld = null; applyData(result); }
+  } else if (action === 'world-delete') { ui.confirmWorld = id; rerender();
+  } else if (action === 'world-delete-no') { ui.confirmWorld = null; rerender();
+  } else if (action === 'world-delete-yes') {
+    ui.confirmWorld = null;
+    await run(async () => applyData(await api.deleteWorld(id)));
+  } else if (action === 'world-add') {
+    await addWorld($('newWorldName').value);
+  } else if (action === 'toggle-picker') {
+    ui.picker = ui.picker === target ? null : target; rerender();
+  } else if (action === 'pick-icon') {
+    ui.picker = null;
+    if (target === 'new') { ui.newCategoryIcon = iconKey; return rerender(); }
+    const category = data.categories.find((c) => c.id === target);
+    await run(async () => applyData(await api.saveCategory({ ...category, icon: iconKey })));
+  } else if (action === 'category-add') {
+    const name = $('newCategoryName').value;
+    const result = await run(() => api.saveCategory({ world_id: currentWorldId, name, icon: ui.newCategoryIcon }));
+    if (result) { ui.newCategoryIcon = 'bookmark'; applyData(result); }
+  } else if (action === 'category-delete') {
+    await run(async () => applyData(await api.deleteCategory(id)));
+  }
+});
+
+$('worldsPane').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' && event.key !== 'Escape') return;
+  if (event.target.id === 'newWorldName' && event.key === 'Enter') addWorld(event.target.value);
+  else if (event.target.id === 'newCategoryName' && event.key === 'Enter') document.querySelector('[data-action="category-add"]').click();
+  else if (event.target.dataset.worldInput) {
+    if (event.key === 'Enter') document.querySelector('[data-action="world-rename-save"]').click();
+    else { ui.editingWorld = null; renderWorlds(); }
+  } else if (event.target.dataset.categoryInput && event.key === 'Enter') event.target.blur();
+});
+
+$('worldsPane').addEventListener('change', async (event) => {
+  const id = event.target.dataset.categoryInput;
+  if (!id) return;
+  const category = data.categories.find((c) => c.id === id);
+  const result = await run(() => api.saveCategory({ ...category, name: event.target.value }));
+  if (result) applyData(result); else renderWorlds();
+});
+
+async function addWorld(name) {
+  const result = await run(() => api.saveWorld({ name }));
+  if (!result) return false;
+  currentWorldId = result.savedId;
+  api.setSetting('current_world', currentWorldId);
+  applyData(result);
+  return true;
+}
+
+/* Welcome */
+async function createFirstWorld() {
+  $('welcomeError').textContent = '';
+  try {
+    const result = await api.saveWorld({ name: $('welcomeName').value });
+    currentWorldId = result.savedId;
+    api.setSetting('current_world', currentWorldId);
+    applyData(result);
+    showTab('capture');
+  } catch (error) {
+    $('welcomeError').textContent = errorMessage(error);
+  }
+}
+$('welcomeCreate').addEventListener('click', createFirstWorld);
+$('welcomeName').addEventListener('keydown', (event) => { if (event.key === 'Enter') createFirstWorld(); });
+
+/* Main-process events */
+api.onCoordinates((coordinates) => {
+  currentCoords = coordinates;
+  renderCoords();
+  updateConversion();
+  showTab('capture');
+});
+// Fired right after Ctrl+Alt+C auto-opens the overlay so the name can be typed without the mouse.
+api.onRequestFocusName(() => { showTab('capture'); $('wpName').focus(); $('wpName').select(); });
+api.onDataUpdated(applyData);
+api.onSyncStatus((status) => {
+  $('syncStatus').lastElementChild.textContent = status.connected
+    ? 'Connected to LAN peer'
+    : `${status.peers || 0} LAN peer${status.peers === 1 ? '' : 's'}`;
+});
+api.onSyncError((message) => toast(`Sync error: ${message}`, true));
+api.onMinecraftStatus((status) => {
+  $('minecraftStatus').lastElementChild.textContent = status.running ? 'Minecraft detected' : 'Waiting for Minecraft';
+  $('minecraftStatus').classList.toggle('offline', !status.running);
+});
+
+$('pinBtn').addEventListener('click', async () => {
+  const pinned = !$('pinBtn').classList.contains('active');
+  await api.setPinned(pinned);
+  setPinnedUi(pinned);
+});
+function setPinnedUi(pinned) {
   $('pinBtn').classList.toggle('active', pinned);
   $('pinBtn').title = pinned ? 'Always on top (click to unpin)' : 'Keep window on top';
+}
+
+/* Startup */
+hydrateIcons();
+renderCoords();
+Promise.all([api.getData(), api.getSetting('current_world'), api.getPinned()]).then(([initial, savedWorld, pinned]) => {
+  currentWorldId = savedWorld;
+  setPinnedUi(pinned);
+  applyData(initial);
+  if (data.waypoints.length) showTab('journal');
 });

@@ -1,0 +1,26 @@
+:root {
+  --bg-0: #1a120e;
+  --bg-1: #241914;
+  --leather: #2e211a;
+  --leather-2: #3a2a21;
+  --leather-3: #4a362a;
+  --stitch: #7a5c42;
+  --brass: #c9a45c;
+  --brass-dim: #9c7f45;
+  --brass-ink: #2a1c10;
+  --parchment: #e8dcc3;
+  --ink-dim: #b3a283;
+  --danger: #c0583e;
+  --ok: #8aa862;
+  --dim-overworld: #7fa65f;
+  --dim-nether: #cf6a48;
+  --dim-end: #a283c4;
+
+  --font-display: Georgia, 'Palatino Linotype', Palatino, 'Book Antiqua', serif;
+  --font-body: 'Segoe UI', system-ui, sans-serif;
+  --font-mono: Consolas, 'Cascadia Mono', 'Courier New', monospace;
+
+  --radius: 8px;
+  --shadow: 0 2px 6px rgba(0, 0, 0, 0.45);
+  --grain: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.012) 0 2px, rgba(0, 0, 0, 0.02) 2px 4px);
+}

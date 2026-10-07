@@ -5,48 +5,84 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Minecraft Field Notes</title>
   <link rel="icon" href="assets/app-icon.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="layout.css">
+  <link rel="stylesheet" href="components.css">
 </head>
 <body>
   <main class="shell">
     <header class="titlebar">
-      <div><span class="eyebrow">ACHIEVEMENT-SAFE COMPANION</span><h1>Field Notes</h1></div>
+      <div class="brand"><img src="assets/app-icon.png" alt="" width="22" height="22"><h1>Field Notes</h1></div>
       <div class="titlebar-actions">
-        <button id="pinBtn" class="icon-button" title="Keep window on top">📌</button>
-        <button id="closeBtn" class="icon-button" title="Hide overlay">×</button>
+        <button id="pinBtn" class="icon-button" title="Keep window on top" data-icon="thumbtack"></button>
+        <button id="closeBtn" class="icon-button" title="Hide to tray" data-icon="close"></button>
       </div>
     </header>
-    <section class="toolbar">
-      <span id="minecraftStatus" class="status offline"><i class="offline"></i> Waiting for Minecraft</span>
-      <span id="syncStatus" class="status"><i></i> LAN ready</span>
-      <button id="settingsBtn" class="subtle-button">Manage</button>
-    </section>
-    <section class="capture-card">
-      <div class="section-heading"><span>New waypoint</span><span id="captureHint">Copy coordinates in Minecraft</span></div>
-      <div id="coordsDisplay" class="coordinates">Waiting for CTRL + ALT + C...</div>
-      <div class="grid two">
-        <label>Name<input id="wpName" placeholder="Home, spawner, village..."></label>
-        <label>World<select id="wpWorld"></select></label>
+
+    <div class="worldbar">
+      <label for="worldSelect">World</label>
+      <select id="worldSelect"></select>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" data-tab="capture">Capture</button>
+      <button class="tab" role="tab" data-tab="journal">Journal <span id="journalCount" class="count"></span></button>
+      <button class="tab" role="tab" data-tab="worlds">Worlds</button>
+    </nav>
+
+    <section id="pane-capture" class="pane active" data-pane="capture">
+      <div class="stamp" id="coordsDisplay">
+        <span class="stamp-label">Coordinates</span>
+        <span class="stamp-value" id="coordsValue">Press Ctrl + Alt + C in Minecraft</span>
       </div>
-      <div class="grid two">
-        <label>Category<select id="wpCategory"></select></label>
-        <label>Dimension<select id="wpDimension"><option value="overworld">Overworld</option><option value="nether">Nether</option><option value="the_end">The End</option></select></label>
+      <div id="captureForm" class="form">
+        <label>Name<input id="wpName" placeholder="Home, spawner, village..." autocomplete="off"></label>
+        <div class="grid two">
+          <label>Category
+            <span class="select-with-icon"><span id="catPreview" class="select-icon"></span><select id="wpCategory"></select></span>
+          </label>
+          <label>Dimension
+            <select id="wpDimension"><option value="overworld">Overworld</option><option value="nether">Nether</option><option value="the_end">The End</option></select>
+          </label>
+        </div>
+        <label>Notes<textarea id="wpDescription" rows="3" placeholder="Optional notes"></textarea></label>
+        <div id="conversionDisplay" class="conversion">Portal target: —</div>
+        <div class="actions">
+          <label class="check"><input type="checkbox" id="wpFavorite"> Pin to top</label>
+          <button id="saveBtn" class="primary">Save waypoint</button>
+        </div>
+        <p class="hint"><kbd>Enter</kbd> saves and returns to Minecraft · <kbd>Esc</kbd> discards</p>
       </div>
-      <label>Description<textarea id="wpDescription" rows="2" placeholder="Optional notes"></textarea></label>
-      <div id="conversionDisplay" class="conversion">Portal target: —</div>
-      <div class="actions"><label class="favorite"><input type="checkbox" id="wpFavorite"> Pin waypoint</label><button id="saveBtn" class="primary">Save waypoint</button></div>
     </section>
-    <section class="list-section">
-      <div class="section-heading"><span>Saved waypoints</span><input id="searchInput" class="search" placeholder="Filter notes"></div>
-      <div id="logList" class="log-list"></div>
+
+    <section id="pane-journal" class="pane" data-pane="journal">
+      <div class="searchbox"><span data-icon="search"></span><input id="searchInput" placeholder="Search this world's waypoints" autocomplete="off"></div>
+      <div id="journalList" class="journal-list"></div>
     </section>
-    <section id="managePanel" class="manage-panel hidden">
-      <div class="section-heading"><span>Worlds & categories</span><button id="manageClose" class="icon-button">×</button></div>
-      <div class="manage-row"><input id="worldName" placeholder="New world name"><button id="addWorld">Add world</button></div>
-      <div id="worldList"></div>
-      <div class="manage-row"><input id="categoryName" placeholder="New category"><button id="addCategory">Add category</button></div>
+
+    <section id="pane-worlds" class="pane" data-pane="worlds">
+      <div id="worldsPane"></div>
     </section>
+
+    <footer class="statusbar">
+      <span id="minecraftStatus" class="status offline"><i></i><span>Waiting for Minecraft</span></span>
+      <span id="syncStatus" class="status"><i></i><span>LAN ready</span></span>
+    </footer>
+
+    <div id="toast" class="toast" role="status"></div>
+
+    <div id="welcome" class="welcome hidden">
+      <div class="welcome-card">
+        <img src="assets/app-icon.png" alt="" width="56" height="56">
+        <h2>Begin your journal</h2>
+        <p>Every Minecraft world gets its own pages. What is your first world called?</p>
+        <input id="welcomeName" placeholder="e.g. Survival Realm" autocomplete="off">
+        <button id="welcomeCreate" class="primary">Start journal</button>
+        <p id="welcomeError" class="error"></p>
+      </div>
+    </div>
   </main>
+  <script src="icons.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
